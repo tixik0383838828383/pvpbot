@@ -13,10 +13,10 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.RotationAxis;
 
-/** Рисует бота как игрока (скин Стива) с бронёй и предметами в руках. */
+/** Рисует бота как игрока (скин из файла, по нику или Стив) с бронёй и предметами в руках. */
 public class BotRenderer extends BipedEntityRenderer<BotEntity, PlayerEntityModel<BotEntity>> {
-    private static final Identifier TEXTURE = Identifier.ofVanilla("textures/entity/player/wide/steve.png");
 
     public BotRenderer(EntityRendererFactory.Context ctx) {
         super(ctx, new PlayerEntityModel<>(ctx.getPart(EntityModelLayers.PLAYER), false), 0.5f);
@@ -52,8 +52,28 @@ public class BotRenderer extends BipedEntityRenderer<BotEntity, PlayerEntityMode
         super.render(bot, yaw, tickDelta, matrices, vertexConsumers, light);
     }
 
+    /** Спин (бит 1) вращает модель вокруг оси тела, сальто (бит 2) — кувыркает вперёд. Имя над головой не вращается. */
+    @Override
+    protected void setupTransforms(BotEntity bot, MatrixStack matrices, float animationProgress,
+                                   float bodyYaw, float tickDelta, float scale) {
+        super.setupTransforms(bot, matrices, animationProgress, bodyYaw, tickDelta, scale);
+        int fx = bot.getFx();
+        if (fx == 0) {
+            return;
+        }
+        float t = bot.age + tickDelta;
+        matrices.translate(0.0f, 0.9f, 0.0f);
+        if ((fx & 1) != 0) {
+            matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(t * 42.0f));
+        }
+        if ((fx & 2) != 0) {
+            matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees(t * 38.0f));
+        }
+        matrices.translate(0.0f, -0.9f, 0.0f);
+    }
+
     @Override
     public Identifier getTexture(BotEntity entity) {
-        return TEXTURE;
+        return SkinCache.resolve(entity.getSkin());
     }
 }

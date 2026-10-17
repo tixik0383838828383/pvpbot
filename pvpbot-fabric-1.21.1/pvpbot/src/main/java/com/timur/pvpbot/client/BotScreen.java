@@ -1,5 +1,6 @@
 package com.timur.pvpbot.client;
 
+import com.timur.pvpbot.BotCommandPayload;
 import com.timur.pvpbot.BotConfig;
 import com.timur.pvpbot.BotRequestPayload;
 import com.timur.pvpbot.SkillProfile;
@@ -8,31 +9,44 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.SliderWidget;
+import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
+import net.minecraft.util.Util;
 
-/** GUI: скилл, оружие, броня, набор умений. Настройки запоминаются до перезапуска игры. */
+/** GUI: скилл, оружие, броня, умения, скин. Настройки запоминаются до перезапуска игры. */
 public class BotScreen extends Screen {
     private static int skill = 5;
     private static int armor = 3;
     private static int weapon = BotConfig.W_SWORD;
     private static int flags = BotConfig.ALL_DEFAULT_FLAGS;
+    private static String skin = "";
 
     private static final String[] WEAPONS = {"Меч", "Топор", "Булава"};
     private static final String[] ARMORS = {"Без брони", "Железо", "Алмаз", "Незерит", "Незерит + чары"};
+
+    private TextFieldWidget skinField;
 
     public BotScreen() {
         super(Text.literal("PvP-тренер"));
     }
 
+    public static int skill() {
+        return skill;
+    }
+
+    public static String skin() {
+        return skin;
+    }
+
     public static BotRequestPayload spawnPayload() {
-        return new BotRequestPayload(BotRequestPayload.SPAWN, skill, armor, weapon, flags);
+        return new BotRequestPayload(BotRequestPayload.SPAWN, skill, armor, weapon, flags, skin);
     }
 
     @Override
     protected void init() {
         int cx = this.width / 2;
-        int top = Math.max(10, this.height / 2 - 106);
+        int top = Math.max(8, this.height / 2 - 128);
         int left = cx - 155;
         int right = cx + 3;
 
@@ -41,29 +55,57 @@ public class BotScreen extends Screen {
         this.addDrawableChild(ButtonWidget.builder(weaponText(), b -> {
             weapon = (weapon + 1) % WEAPONS.length;
             b.setMessage(weaponText());
-        }).dimensions(left, top + 40, 152, 20).build());
+        }).dimensions(left, top + 38, 152, 20).build());
 
         this.addDrawableChild(ButtonWidget.builder(armorText(), b -> {
             armor = (armor + 1) % ARMORS.length;
             b.setMessage(armorText());
-        }).dimensions(right, top + 40, 152, 20).build());
+        }).dimensions(right, top + 38, 152, 20).build());
 
-        addToggle("Щит", BotConfig.SHIELD, left, top + 64);
-        addToggle("Лук", BotConfig.BOW, right, top + 64);
-        addToggle("Паутина", BotConfig.WEB, left, top + 88);
-        addToggle("Клатч: вода", BotConfig.WATER, right, top + 88);
-        addToggle("Клатч: жемчуг", BotConfig.PEARL, left, top + 112);
-        addToggle("Зол. яблоки", BotConfig.APPLE, right, top + 112);
-        addToggle("Авто-респавн", BotConfig.RESPAWN, left, top + 136);
+        addToggle("Щит", BotConfig.SHIELD, left, top + 60);
+        addToggle("Лук", BotConfig.BOW, right, top + 60);
+        addToggle("Паутина", BotConfig.WEB, left, top + 82);
+        addToggle("Клатч: вода", BotConfig.WATER, right, top + 82);
+        addToggle("Клатч: жемчуг", BotConfig.PEARL, left, top + 104);
+        addToggle("Зол. яблоки", BotConfig.APPLE, right, top + 104);
+        addToggle("Авто-респавн", BotConfig.RESPAWN, left, top + 126);
+        addToggle("Стройка", BotConfig.BUILD, right, top + 126);
+        addToggle("Спин-бот (вращение)", BotConfig.SPIN, left, top + 148);
+
+        this.addDrawableChild(ButtonWidget.builder(Text.literal("Папка скинов"), b -> {
+            Util.getOperatingSystem().open(SkinCache.ensureSkinDir());
+        }).dimensions(right, top + 148, 152, 20).build());
+
+        skinField = new TextFieldWidget(this.textRenderer, left, top + 172, 310, 20, Text.literal("Скин"));
+        skinField.setMaxLength(48);
+        skinField.setText(skin);
+        skinField.setPlaceholder(Text.literal("Скин: ник игрока или файл.png (пусто = Стив)"));
+        skinField.setChangedListener(s -> skin = s.trim());
+        this.addDrawableChild(skinField);
 
         this.addDrawableChild(ButtonWidget.builder(Text.literal("Заспавнить").formatted(Formatting.GREEN), b -> {
             ClientPlayNetworking.send(spawnPayload());
             this.close();
-        }).dimensions(right, top + 136, 152, 20).build());
+        }).dimensions(left, top + 196, 152, 20).build());
+
+        this.addDrawableChild(ButtonWidget.builder(Text.literal("Мои боты / бои..."), b -> {
+            ClientPlayNetworking.send(new BotCommandPayload(BotCommandPayload.REQUEST_LIST, 0, ""));
+            this.client.setScreen(new BotListScreen());
+        }).dimensions(right, top + 196, 152, 20).build());
+
+        this.addDrawableChild(ButtonWidget.builder(autopilotText(), b -> {
+            ClientAutopilot.toggle(this.client);
+            this.close();
+        }).dimensions(left, top + 218, 152, 20).build());
 
         this.addDrawableChild(ButtonWidget.builder(Text.literal("Удалить всех ботов").formatted(Formatting.RED), b -> {
-            ClientPlayNetworking.send(new BotRequestPayload(BotRequestPayload.CLEAR, 1, 0, 0, 0));
-        }).dimensions(left, top + 160, 310, 20).build());
+            ClientPlayNetworking.send(new BotRequestPayload(BotRequestPayload.CLEAR, 1, 0, 0, 0, ""));
+        }).dimensions(right, top + 218, 152, 20).build());
+    }
+
+    private static Text autopilotText() {
+        return Text.literal(ClientAutopilot.isActive() ? "Стать ботом: ВЫКЛЮЧИТЬ" : "Стать ботом (автопилот)")
+                .formatted(ClientAutopilot.isActive() ? Formatting.RED : Formatting.AQUA);
     }
 
     private void addToggle(String name, int flag, int x, int y) {
@@ -91,12 +133,12 @@ public class BotScreen extends Screen {
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         super.render(context, mouseX, mouseY, delta);
         int cx = this.width / 2;
-        int top = Math.max(10, this.height / 2 - 106);
+        int top = Math.max(8, this.height / 2 - 128);
 
         context.drawCenteredTextWithShadow(this.textRenderer, this.title, cx, top, 0xFFFFFF);
 
         SkillProfile p = SkillProfile.of(skill);
-        int y = top + 186;
+        int y = top + 242;
         context.drawCenteredTextWithShadow(this.textRenderer,
                 Text.literal("Реакция ~" + (p.reaction * 50) + " мс  ·  разброс прицела ±" + String.format("%.1f", p.aimError) + "°"),
                 cx, y, 0xAAAAAA);
@@ -105,7 +147,7 @@ public class BotScreen extends Screen {
                         + "%  ·  крит-прыжки " + Math.round(p.critChance * 100) + "%"),
                 cx, y + 11, 0xAAAAAA);
         context.drawCenteredTextWithShadow(this.textRenderer,
-                Text.literal("Бот бьёт тебя в режиме выживания. Макс. 6 ботов."),
+                Text.literal("Макс. 10 ботов. Автопилот бьёт только ботов и мобов, не игроков."),
                 cx, y + 22, 0x777777);
     }
 

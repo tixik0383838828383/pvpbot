@@ -1,6 +1,8 @@
 {
   "key.pvpbot.open": "Открыть меню PvP-бота",
   "key.pvpbot.quick": "Заспавнить бота (прошлые настройки)",
+  "key.pvpbot.autopilot": "Стать ботом (автопилот вкл/выкл)",
+  "key.pvpbot.select": "Выбрать / снять выбор бота под прицелом",
   "key.categories.pvpbot": "PvP-тренер",
   "entity.pvpbot.pvp_bot": "PvP-бот"
 }

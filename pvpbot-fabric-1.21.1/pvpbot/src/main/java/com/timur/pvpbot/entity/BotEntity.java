@@ -1,9 +1,15 @@
 package com.timur.pvpbot.entity;
 
 import com.timur.pvpbot.BotConfig;
+import com.timur.pvpbot.BotListPayload;
 import com.timur.pvpbot.PvpBotMod;
 import com.timur.pvpbot.SkillProfile;
 import net.minecraft.block.Blocks;
+import net.minecraft.entity.data.DataTracker;
+import net.minecraft.entity.data.TrackedData;
+import net.minecraft.entity.data.TrackedDataHandlerRegistry;
+import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.util.Formatting;
 import net.minecraft.enchantment.Enchantment;
 import net.minecraft.enchantment.Enchantments;
 import net.minecraft.entity.EntityType;
@@ -88,6 +94,34 @@ public class BotEntity extends PathAwareEntity {
     private Vec3d lastTargetPos = null;
     private Vec3d targetVel = Vec3d.ZERO;
     private int ownerMissing = 0;
+
+    // ---------- синхронизируемые с клиентом данные ----------
+    /** Скин: пустая строка = Стив, «ник» = скин игрока, «имя.png» = файл из config/pvpbot/skins. */
+    private static final TrackedData<String> SKIN =
+            DataTracker.registerData(BotEntity.class, TrackedDataHandlerRegistry.STRING);
+    /** Биты эффектов: 1 — спин модели, 2 — сальто в воздухе. */
+    private static final TrackedData<Integer> FX =
+            DataTracker.registerData(BotEntity.class, TrackedDataHandlerRegistry.INTEGER);
+
+    // ---------- режимы, команды, выбор ----------
+    private int mode = BotListPayload.MODE_TRAIN;
+    private int team = 0;
+    private int fightGroup = 0;
+    private boolean selected = false;
+    private LivingEntity currentTarget = null;
+
+    // осматривание, когда нет цели
+    private int lookTimer = 0;
+    private float lookYawT = 0, lookPitchT = 0;
+
+    // стройка
+    private ItemStack blockStack = ItemStack.EMPTY;
+    private final List<PlacedBlock> built = new ArrayList<>();
+    private int pillarLeft = 0;
+    private int pillarTicks = 0;
+    private boolean towerDrop = false;
+    private int towerCd = 60;
+    private int bridgeCd = 0;
 
     // паутина
     private int webCd = 40;
@@ -176,6 +210,75 @@ public class BotEntity extends PathAwareEntity {
         return ownerId;
     }
 
+    @Override
+    protected void initDataTracker(DataTracker.Builder builder) {
+        super.initDataTracker(builder);
+        builder.add(SKIN, "");
+        builder.add(FX, 0);
+    }
+
+    public String getSkin() {
+        return dataTracker.get(SKIN);
+    }
+
+    public int getFx() {
+        return dataTracker.get(FX);
+    }
+
+    /** Меняет скин (ник игрока или имя .png файла) и обновляет имя над головой. */
+    public void applySkin(String skin) {
+        String s = skin == null ? "" : skin.trim();
+        dataTracker.set(SKIN, s);
+        updateName();
+    }
+
+    public int getMode() {
+        return mode;
+    }
+
+    public void setMode(int mode) {
+        this.mode = mode;
+        if (mode != BotListPayload.MODE_FIGHT) {
+            fightGroup = 0;
+        }
+        updateName();
+    }
+
+    public int getTeam() {
+        return team;
+    }
+
+    public void setTeam(int team) {
+        this.team = team;
+        updateName();
+    }
+
+    public void setFightGroup(int group) {
+        this.fightGroup = group;
+    }
+
+    public boolean isSelected() {
+        return selected;
+    }
+
+    public void setSelected(boolean selected) {
+        this.selected = selected;
+        setGlowing(selected);
+    }
+
+    private void updateName() {
+        String skin = getSkin();
+        String base = (!skin.isEmpty() && !skin.toLowerCase().endsWith(".png")) ? skin : "PvP-бот";
+        String icon = switch (mode) {
+            case BotListPayload.MODE_FIGHT -> "[Бой] ";
+            case BotListPayload.MODE_GUARD -> "[Охрана] ";
+            default -> "";
+        };
+        Formatting color = team == 1 ? Formatting.RED : team == 2 ? Formatting.AQUA : Formatting.WHITE;
+        setCustomName(Text.literal(icon + base + " [" + sk.level + " · " + sk.rank() + "]").formatted(color));
+        setCustomNameVisible(true);
+    }
+
     // =====================================================================
     //  Настройка и экипировка
     // =====================================================================
@@ -184,8 +287,8 @@ public class BotEntity extends PathAwareEntity {
         this.ownerId = owner;
         this.cfg = config;
         this.sk = SkillProfile.of(config.skill());
-        this.setCustomName(Text.literal("PvP-бот [" + sk.level + " · " + sk.rank() + "]"));
-        this.setCustomNameVisible(true);
+        dataTracker.set(SKIN, config.skin());
+        updateName();
         buildLoadout(world);
         this.webCd = 40;
         this.windCd = 40;
@@ -246,6 +349,7 @@ public class BotEntity extends PathAwareEntity {
         waterStack = new ItemStack(Items.WATER_BUCKET);
         pearlStack = new ItemStack(Items.ENDER_PEARL, 8);
         windStack = new ItemStack(Items.WIND_CHARGE, 16);
+        blockStack = new ItemStack(Items.COBBLESTONE, 64);
         pearls = cfg.has(BotConfig.PEARL) ? 8 : 0;
         apples = cfg.has(BotConfig.APPLE) ? 8 : 0;
 
@@ -284,8 +388,8 @@ public class BotEntity extends PathAwareEntity {
         }
         tickTimers(world);
 
-        PlayerEntity owner = ownerId == null ? null : world.getPlayerByUuid(ownerId);
-        if (owner == null || !owner.isAlive() || owner.isSpectator() || owner.getWorld() != world) {
+        PlayerEntity ownerPlayer = ownerId == null ? null : world.getPlayerByUuid(ownerId);
+        if (ownerPlayer == null || !ownerPlayer.isAlive() || ownerPlayer.isSpectator() || ownerPlayer.getWorld() != world) {
             if (++ownerMissing > 400) {
                 discard();
             }
@@ -295,23 +399,138 @@ public class BotEntity extends PathAwareEntity {
         }
         ownerMissing = 0;
 
-        Vec3d tp = owner.getPos();
+        // текущая цель: владелец (тренировка), другой бот (конфликт) или враждебный моб (охрана)
+        LivingEntity target = pickTarget(world, ownerPlayer);
+        if (target != currentTarget) {
+            currentTarget = target;
+            lastTargetPos = null;
+            wantWeb = false;
+            bowMode = false;
+            pillarLeft = 0;
+            towerDrop = false;
+        }
+        resetMove();
+        updateFx();
+
+        if (target == null) {
+            if (!tickClutch(world, ownerPlayer)) {
+                tickIdle(ownerPlayer);
+            }
+            finishMove(ownerPlayer);
+            return;
+        }
+
+        Vec3d tp = target.getPos();
         targetVel = lastTargetPos == null ? Vec3d.ZERO : tp.subtract(lastTargetPos);
         lastTargetPos = tp;
 
-        resetMove();
         if (navTicks > 0 && age % 10 == 0) {
-            getNavigation().startMovingTo(owner, 1.2);
+            getNavigation().startMovingTo(target, 1.2);
         }
 
-        boolean handled = tickClutch(world, owner)
-                || tickEat(owner)
-                || tickBow(world, owner)
-                || tickWebPlace(world, owner);
+        boolean handled = tickClutch(world, target)
+                || tickEat(target)
+                || tickBow(world, target)
+                || tickBuild(world, target)
+                || tickWebPlace(world, target);
         if (!handled) {
-            tickMelee(world, owner);
+            tickMelee(world, target);
         }
-        finishMove(owner);
+        finishMove(target);
+    }
+
+    // =====================================================================
+    //  Выбор цели, режимы, безделье
+    // =====================================================================
+
+    private LivingEntity pickTarget(ServerWorld world, PlayerEntity ownerPlayer) {
+        switch (mode) {
+            case BotListPayload.MODE_FIGHT: {
+                BotEntity best = null;
+                double bd = Double.MAX_VALUE;
+                for (BotEntity b : world.getEntitiesByType(PvpBotMod.BOT, e -> e != this && e.isAlive())) {
+                    if (b.fightGroup != fightGroup || fightGroup == 0) {
+                        continue;
+                    }
+                    if (team != 0 && b.team == team) {
+                        continue;
+                    }
+                    double d = b.squaredDistanceTo(this);
+                    if (d < bd) {
+                        bd = d;
+                        best = b;
+                    }
+                }
+                if (best != null) {
+                    return best;
+                }
+                // бой закончен: победители стоят и осматриваются
+                mode = BotListPayload.MODE_IDLE;
+                fightGroup = 0;
+                ownerPlayer.sendMessage(Text.literal("§aБой окончен. Победил: ").append(getName()), true);
+                return null;
+            }
+            case BotListPayload.MODE_GUARD: {
+                HostileEntity best = null;
+                double bd = Double.MAX_VALUE;
+                for (HostileEntity m : world.getEntitiesByClass(HostileEntity.class,
+                        ownerPlayer.getBoundingBox().expand(18.0), e -> e.isAlive())) {
+                    double d = m.squaredDistanceTo(this);
+                    if (d < bd) {
+                        bd = d;
+                        best = m;
+                    }
+                }
+                return best;
+            }
+            case BotListPayload.MODE_IDLE:
+                return null;
+            default:
+                return ownerPlayer;
+        }
+    }
+
+    /** Нет цели: охранник идёт за владельцем, остальные осматриваются во все стороны. */
+    private void tickIdle(PlayerEntity ownerPlayer) {
+        if (isUsingItem()) {
+            clearActiveItem();
+        }
+        if (getMainHandStack().isEmpty() || !getMainHandStack().isOf(weaponStack.getItem())) {
+            held(weaponStack);
+        }
+        if (mode == BotListPayload.MODE_GUARD) {
+            double hd = horizDist(ownerPlayer);
+            if (hd > 40.0) {
+                refreshPositionAndAngles(ownerPlayer.getX(), ownerPlayer.getY(), ownerPlayer.getZ(), getYaw(), 0.0f);
+                return;
+            }
+            if (hd > 4.0) {
+                aimAtPoint(ownerPlayer.getEyePos(), false);
+                mvF = 1.0f;
+                mvSprint = hd > 7.0;
+                return;
+            }
+        }
+        if (--lookTimer <= 0) {
+            lookTimer = 20 + random.nextInt(60);
+            lookYawT = random.nextFloat() * 360.0f - 180.0f;
+            lookPitchT = (random.nextFloat() - 0.5f) * 70.0f;
+        }
+        rotate(lookYawT, lookPitchT);
+    }
+
+    /** Синхронизирует с клиентом биты эффектов: 1 — спин модели, 2 — сальто (прыжок с булавой). */
+    private void updateFx() {
+        int fx = 0;
+        if (cfg.has(BotConfig.SPIN)) {
+            fx |= 1;
+        }
+        if (!isOnGround() && (smashing || towerDrop)) {
+            fx |= 2;
+        }
+        if (dataTracker.get(FX) != fx) {
+            dataTracker.set(FX, fx);
+        }
     }
 
     private void tickTimers(ServerWorld world) {
@@ -322,6 +541,18 @@ public class BotEntity extends PathAwareEntity {
         if (appleCd > 0) appleCd--;
         if (windCd > 0) windCd--;
         if (pearlCd > 0) pearlCd--;
+        if (towerCd > 0) towerCd--;
+        if (bridgeCd > 0) bridgeCd--;
+
+        built.removeIf(b -> {
+            if (age >= b.expire()) {
+                if (world.getBlockState(b.pos()).isOf(Blocks.COBBLESTONE)) {
+                    world.setBlockState(b.pos(), Blocks.AIR.getDefaultState());
+                }
+                return true;
+            }
+            return false;
+        });
 
         if (--noiseTimer <= 0) {
             noiseTimer = sk.noiseInterval + random.nextInt(3);
@@ -360,7 +591,7 @@ public class BotEntity extends PathAwareEntity {
     //  Клатч: вода (MLG) и жемчуг над бездной
     // =====================================================================
 
-    private boolean tickClutch(ServerWorld world, PlayerEntity owner) {
+    private boolean tickClutch(ServerWorld world, LivingEntity owner) {
         boolean falling = !isOnGround() && !isTouchingWater() && !isClimbing() && getVelocity().y < -0.3;
         if (!falling) {
             fallTicks = 0;
@@ -438,7 +669,7 @@ public class BotEntity extends PathAwareEntity {
     //  Золотое яблоко
     // =====================================================================
 
-    private boolean tickEat(PlayerEntity owner) {
+    private boolean tickEat(LivingEntity owner) {
         if (eating) {
             aimAtPoint(chestOf(owner), true);
             if (!isUsingItem()) {
@@ -466,7 +697,7 @@ public class BotEntity extends PathAwareEntity {
     //  Лук
     // =====================================================================
 
-    private boolean tickBow(ServerWorld world, PlayerEntity owner) {
+    private boolean tickBow(ServerWorld world, LivingEntity owner) {
         if (!cfg.has(BotConfig.BOW)) {
             return false;
         }
@@ -505,7 +736,7 @@ public class BotEntity extends PathAwareEntity {
         return true;
     }
 
-    private Vec3d bowAimPoint(PlayerEntity owner) {
+    private Vec3d bowAimPoint(LivingEntity owner) {
         Vec3d tp = chestOf(owner);
         double dist = getEyePos().distanceTo(tp);
         double flight = dist / 2.8;
@@ -536,7 +767,105 @@ public class BotEntity extends PathAwareEntity {
     //  Паутина
     // =====================================================================
 
-    private boolean tickWebPlace(ServerWorld world, PlayerEntity owner) {
+    // =====================================================================
+    //  Стройка: мосты, столбы вверх, башня для удара булавой
+    // =====================================================================
+
+    private boolean tickBuild(ServerWorld world, LivingEntity tgt) {
+        if (!cfg.has(BotConfig.BUILD) || sk.level < 3) {
+            return false;
+        }
+        boolean mace = cfg.weapon() == BotConfig.W_MACE;
+        double hd = horizDist(tgt);
+
+        // 1) шаг с башни: берём булаву и прыгаем на цель
+        if (towerDrop) {
+            aimAtPoint(chestOf(tgt), false);
+            if (!held(weaponStack)) {
+                return true;
+            }
+            if (isOnGround()) {
+                Vec3d d = new Vec3d(tgt.getX() - getX(), 0, tgt.getZ() - getZ());
+                double len = d.length();
+                Vec3d h = len > 0.01 ? d.multiply(1.0 / len) : Vec3d.ZERO;
+                setVelocity(h.x * 0.24, 0.12, h.z * 0.24);
+                smashing = true;
+                smashTicks = -12;
+                towerDrop = false;
+            }
+            return true;
+        }
+
+        // 2) идёт строительство столба: прыжок -> блок под ноги в верхней точке
+        if (pillarLeft > 0) {
+            aimAtPoint(chestOf(tgt), false);
+            if (++pillarTicks > 240 || !held(blockStack)) {
+                if (pillarTicks > 240) {
+                    pillarLeft = 0;
+                }
+                return true;
+            }
+            if (isOnGround()) {
+                if (!world.getBlockState(getBlockPos().up(2)).isAir() || !world.getBlockState(getBlockPos().up(3)).isAir()) {
+                    pillarLeft = 0;
+                    if (mace && pillarTicks > 4) {
+                        towerDrop = true;
+                    }
+                    return true;
+                }
+                mvJump = true;
+            } else if (getVelocity().y < 0.0) {
+                BlockPos under = getBlockPos().down();
+                if (world.getBlockState(under).isReplaceable()) {
+                    placeBlock(world, under);
+                    pillarLeft--;
+                    if (pillarLeft == 0 && mace) {
+                        towerDrop = true;
+                    }
+                }
+            }
+            return true;
+        }
+
+        boolean sees = canSee(tgt);
+
+        // 3) решение начать башню для удара булавой или столб к цели, которая выше
+        if (isOnGround() && !smashing && sees) {
+            if (mace && towerCd <= 0 && hd > 1.5 && hd < 10.0 && random.nextDouble() < 0.02 + 0.06 * sk.t) {
+                pillarLeft = 4 + random.nextInt(1 + sk.level / 3);
+                pillarTicks = 0;
+                towerCd = 240 + random.nextInt(120);
+                return true;
+            }
+            double dy = tgt.getY() - getY();
+            if (dy >= 2.0 && hd < 6.0 && random.nextDouble() < 0.25) {
+                pillarLeft = Math.min(6, (int) dy);
+                pillarTicks = 0;
+                return true;
+            }
+        }
+
+        // 4) мост: перед ботом пропасть — кладём блок и идём дальше
+        if (isOnGround() && hd > 3.0 && bridgeCd <= 0 && tgt.getY() >= getY() - 2.5) {
+            Vec3d dir = new Vec3d(tgt.getX() - getX(), 0, tgt.getZ() - getZ()).normalize();
+            BlockPos ahead = BlockPos.ofFloored(getX() + dir.x * 0.9, getY() - 0.5, getZ() + dir.z * 0.9);
+            if (world.getBlockState(ahead).isReplaceable() && world.getBlockState(ahead.down()).isReplaceable()
+                    && held(blockStack)) {
+                placeBlock(world, ahead);
+                bridgeCd = 4;
+            }
+        }
+        return false;
+    }
+
+    private void placeBlock(ServerWorld world, BlockPos pos) {
+        world.setBlockState(pos, Blocks.COBBLESTONE.getDefaultState());
+        built.add(new PlacedBlock(pos, age + 300 + random.nextInt(100)));
+        playSound(SoundEvents.BLOCK_STONE_PLACE, 1.0f, 1.0f);
+        swingHand(Hand.MAIN_HAND);
+    }
+
+    private boolean tickWebPlace(ServerWorld world, LivingEntity owner) {
         if (!cfg.has(BotConfig.WEB) || sk.level < 2) {
             return false;
         }
@@ -575,7 +904,7 @@ public class BotEntity extends PathAwareEntity {
     //  Ближний бой (меч / топор / булава)
     // =====================================================================
 
-    private void tickMelee(ServerWorld world, PlayerEntity owner) {
+    private void tickMelee(ServerWorld world, LivingEntity owner) {
         double hd = horizDist(owner);
         double dist = distanceTo(owner);
         boolean sees = canSee(owner);
@@ -620,6 +949,10 @@ public class BotEntity extends PathAwareEntity {
         if (hd < 6.0 && sk.strafe > 0.2) {
             mvS = (float) (strafeDir * sk.strafe * 0.9);
         }
+        // «бани-хоп» при сближении: прыжки на бегу быстрее и непредсказуемее
+        if (sk.level >= 5 && hd > 4.5 && isOnGround() && !mace && random.nextInt(12) == 0) {
+            mvJump = true;
+        }
 
         // крит-прыжок: прыгаем так, чтобы кулдаун дозрел на спуске
         int ticksToReady = (int) Math.ceil(Math.max(0.0, 0.92 - progress) * period);
@@ -656,7 +989,7 @@ public class BotEntity extends PathAwareEntity {
         }
     }
 
-    private void launchSmash(PlayerEntity owner) {
+    private void launchSmash(LivingEntity owner) {
         Vec3d dir = new Vec3d(owner.getX() - getX(), 0, owner.getZ() - getZ());
         double len = dir.length();
         Vec3d h = len > 0.01 ? dir.multiply(1.0 / len) : Vec3d.ZERO;
@@ -672,7 +1005,7 @@ public class BotEntity extends PathAwareEntity {
         }
     }
 
-    private void tickSmash(ServerWorld world, PlayerEntity owner) {
+    private void tickSmash(ServerWorld world, LivingEntity owner) {
         smashTicks++;
         aimAtPoint(chestOf(owner), true);
         if (smashTicks > 90) {
@@ -754,11 +1087,11 @@ public class BotEntity extends PathAwareEntity {
     //  Прицел и движение
     // =====================================================================
 
-    private Vec3d chestOf(PlayerEntity p) {
+    private Vec3d chestOf(LivingEntity p) {
         return p.getPos().add(0, p.getHeight() * 0.62, 0);
     }
 
-    private double horizDist(PlayerEntity p) {
+    private double horizDist(LivingEntity p) {
         return Math.hypot(p.getX() - getX(), p.getZ() - getZ());
     }
 
@@ -810,7 +1143,7 @@ public class BotEntity extends PathAwareEntity {
         mvJump = false;
     }
 
-    private void finishMove(PlayerEntity owner) {
+    private void finishMove(LivingEntity owner) {
         // запасной режим: если бот застрял, на время включаем стандартный pathfinding
         Vec3d pos = getPos();
         if (owner != null && navTicks <= 0) {
@@ -874,6 +1207,12 @@ public class BotEntity extends PathAwareEntity {
                 }
             }
             webs.clear();
+            for (PlacedBlock b : built) {
+                if (world.getBlockState(b.pos()).isOf(Blocks.COBBLESTONE)) {
+                    world.setBlockState(b.pos(), Blocks.AIR.getDefaultState());
+                }
+            }
+            built.clear();
             if (waterPos != null && world.getBlockState(waterPos).isOf(Blocks.WATER)) {
                 world.setBlockState(waterPos, Blocks.AIR.getDefaultState());
             }

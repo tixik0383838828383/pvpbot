@@ -6,8 +6,12 @@ import net.minecraft.network.codec.PacketCodecs;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
 
-/** Клиент -> сервер. action: 0 = спавн, 1 = удалить всех ботов игрока. */
-public record BotRequestPayload(int action, int skill, int armor, int weapon, int flags) implements CustomPayload {
+/**
+ * Клиент -> сервер. action: 0 = спавн, 1 = удалить всех ботов игрока.
+ * skin: ник игрока или имя файла «something.png» из папки config/pvpbot/skins.
+ */
+public record BotRequestPayload(int action, int skill, int armor, int weapon, int flags, String skin)
+        implements CustomPayload {
     public static final int SPAWN = 0;
     public static final int CLEAR = 1;
 
@@ -20,6 +24,7 @@ public record BotRequestPayload(int action, int skill, int armor, int weapon, in
             PacketCodecs.VAR_INT, BotRequestPayload::armor,
             PacketCodecs.VAR_INT, BotRequestPayload::weapon,
             PacketCodecs.VAR_INT, BotRequestPayload::flags,
+            PacketCodecs.string(64), BotRequestPayload::skin,
             BotRequestPayload::new);
 
     @Override

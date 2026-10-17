@@ -1,6 +1,8 @@
 {
   "key.pvpbot.open": "Open PvP bot menu",
   "key.pvpbot.quick": "Spawn bot (last settings)",
+  "key.pvpbot.autopilot": "Become the bot (autopilot on/off)",
+  "key.pvpbot.select": "Select / deselect bot under crosshair",
   "key.categories.pvpbot": "PvP Trainer",
   "entity.pvpbot.pvp_bot": "PvP Bot"
 }
