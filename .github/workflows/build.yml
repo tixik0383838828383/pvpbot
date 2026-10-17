@@ -24,14 +24,17 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # Ставим Gradle сами, т.к. в проекте нет gradlew
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
 
-      - name: Make gradlew executable
-        run: chmod +x gradlew
+      - name: Show project files
+        run: ls -la
 
       - name: Build
-        run: ./gradlew build --no-daemon --stacktrace
+        run: gradle build --no-daemon --stacktrace
 
       - name: Upload mod jar
         uses: actions/upload-artifact@v4
