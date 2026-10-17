@@ -62,7 +62,7 @@ public class BotEntity extends PathAwareEntity {
 
     // ---------- конфигурация ----------
     private UUID ownerId;
-    private BotConfig cfg = new BotConfig(5, 3, 0, BotConfig.ALL_DEFAULT_FLAGS);
+    private BotConfig cfg = new BotConfig(5, 3, 0, BotConfig.ALL_DEFAULT_FLAGS, "");
     private SkillProfile sk = SkillProfile.of(5);
 
     private ItemStack weaponStack = ItemStack.EMPTY;
