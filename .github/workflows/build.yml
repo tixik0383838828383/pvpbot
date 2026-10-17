@@ -10,9 +10,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # Gradle-проект лежит в pvpbot-fabric-1.21.1/pvpbot
     defaults:
       run:
-        working-directory: pvpbot-fabric-1.21.1
+        working-directory: pvpbot-fabric-1.21.1/pvpbot
 
     steps:
       - name: Checkout
@@ -24,14 +25,11 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      # Ставим Gradle сами, т.к. в проекте нет gradlew
+      # gradlew в проекте нет, поэтому ставим Gradle сами
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.10.2
-
-      - name: Show project files
-        run: ls -la
 
       - name: Build
         run: gradle build --no-daemon --stacktrace
@@ -40,5 +38,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pvpbot-fabric-1.21.1
-          path: pvpbot-fabric-1.21.1/build/libs/*.jar
+          path: |
+            pvpbot-fabric-1.21.1/pvpbot/build/libs/*.jar
+            !pvpbot-fabric-1.21.1/pvpbot/build/libs/*-sources.jar
           if-no-files-found: error
