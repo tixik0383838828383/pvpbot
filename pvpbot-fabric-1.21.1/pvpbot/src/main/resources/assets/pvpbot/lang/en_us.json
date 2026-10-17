@@ -1,0 +1,6 @@
+{
+  "key.pvpbot.open": "Open PvP bot menu",
+  "key.pvpbot.quick": "Spawn bot (last settings)",
+  "key.categories.pvpbot": "PvP Trainer",
+  "entity.pvpbot.pvp_bot": "PvP Bot"
+}
