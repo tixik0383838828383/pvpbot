@@ -6,8 +6,8 @@ import net.minecraft.block.Block;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.block.TntBlock;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.input.Input;
 import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.client.option.GameOptions;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.item.BlockItem;
@@ -18,6 +18,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -29,11 +30,34 @@ import java.util.Random;
  * Режим «стать ботом»: игрок сам (на клиенте) дерётся как PvP-бот — наводится, бегает, стрейфится,
  * прыгает на криты, бьёт по кулдауну, ест золотые яблоки, поднимает щит, строит мосты и столбы.
  * Целями выбираются только PvP-боты и враждебные мобы — другие игроки никогда.
- * Управление идёт через обычные клавиши и обычные пакеты атаки, как у живого игрока.
+ *
+ * <p>Клавиши пользователя автопилот НЕ нажимает и не отпускает. Вместо этого:
+ * <ul>
+ *   <li>движение и прыжок идут через собственный {@link AutopilotInput}, который на время автопилота
+ *       подставляется в игрока вместо клавиатурного ввода (ходьба считается по направлению на цель
+ *       независимо от того, куда сейчас повёрнута камера);</li>
+ *   <li>спринт включается напрямую у игрока;</li>
+ *   <li>удары и постройка блоков идут обычными пакетами через interactionManager;</li>
+ *   <li>удержание предмета (яблоко, щит) подсказывается игре через {@code KeyBindingMixin}
+ *       только на время тика — физическая клавиша «использовать» остаётся нетронутой;</li>
+ *   <li>камера поворачивается в конце тика, поэтому вид плавно интерполируется между тиками.</li>
+ * </ul>
  */
 public final class ClientAutopilot {
+    private static final double REACH = 3.0;
+
     private static boolean active = false;
     private static final Random RND = new Random();
+
+    // подменённый ввод игрока
+    private static AutopilotInput ours = null;
+    private static Input original = null;
+
+    // что автопилот хочет в этом тике
+    private static boolean holdUse = false;
+    private static boolean wantSprint = false;
+    private static LivingEntity aimTarget = null;
+    private static boolean aimNoisy = true;
 
     private static float noiseYaw, noisePitch;
     private static int noiseTimer = 0;
@@ -51,49 +75,96 @@ public final class ClientAutopilot {
         return active;
     }
 
+    /** Нужно ли в этом тике считать кнопку «использовать» зажатой (читается из KeyBindingMixin). */
+    public static boolean isHoldingUse() {
+        return active && holdUse;
+    }
+
     public static void toggle(MinecraftClient client) {
         active = !active;
         if (!active) {
-            releaseAll(client);
+            shutdown(client);
         }
         eatTicks = 0;
         if (client.player != null) {
             client.player.sendMessage(Text.literal(active
-                    ? "§aАвтопилот включён: ты дерёшься как бот (клавиша ещё раз — выключить)"
+                    ? "§aАвтопилот включён: бот сам ведёт твоего игрока, клавиши не нужны (клавиша ещё раз — выключить)"
                     : "§7Автопилот выключен"), true);
         }
     }
 
-    private static void releaseAll(MinecraftClient client) {
-        GameOptions o = client.options;
-        o.forwardKey.setPressed(false);
-        o.backKey.setPressed(false);
-        o.leftKey.setPressed(false);
-        o.rightKey.setPressed(false);
-        o.jumpKey.setPressed(false);
-        o.sprintKey.setPressed(false);
-        o.useKey.setPressed(false);
+    /** Возвращает игроку обычное управление и сбрасывает все команды автопилота. */
+    private static void shutdown(MinecraftClient client) {
+        holdUse = false;
+        wantSprint = false;
+        aimTarget = null;
+        ClientPlayerEntity p = client.player;
+        if (p != null) {
+            if (ours != null && p.input == ours && original != null) {
+                p.input = original;
+            }
+            if (p.isSprinting()) {
+                p.setSprinting(false);
+            }
+        }
+        ours = null;
+        original = null;
     }
 
-    /** Вызывается в начале каждого клиентского тика — до чтения клавиш игроком. */
+    /** Подставляет наш ввод игроку (и заново, если игрок был пересоздан — смерть, смена измерения). */
+    private static AutopilotInput install(ClientPlayerEntity p) {
+        if (ours == null) {
+            ours = new AutopilotInput();
+        }
+        if (p.input != ours) {
+            original = p.input;
+            p.input = ours;
+        }
+        return ours;
+    }
+
+    /** Начало каждого клиентского тика — до того, как игрок прочитает ввод и выполнит свой тик. */
     public static void tick(MinecraftClient client) {
         if (!active) {
             return;
         }
         ClientPlayerEntity p = client.player;
-        if (p == null || client.world == null || client.interactionManager == null) {
-            return;
-        }
-        if (!p.isAlive()) {
+        if (p == null || client.world == null || client.interactionManager == null || !p.isAlive()) {
             active = false;
-            releaseAll(client);
+            shutdown(client);
             return;
         }
-        if (client.currentScreen != null) {
-            releaseAll(client);
+
+        AutopilotInput in = install(p);
+        in.clear();
+        holdUse = false;
+        wantSprint = false;
+        aimTarget = null;
+
+        if (client.currentScreen == null) {
+            run(client, p, in);
+        }
+
+        boolean sprint = wantSprint && in.getForward() > 0.3f && !p.isUsingItem() && !p.isTouchingWater();
+        if (p.isSprinting() != sprint) {
+            p.setSprinting(sprint);
+        }
+    }
+
+    /** Конец тика: поворачиваем камеру (так вид интерполируется плавно) и снимаем «зажатие» предмета. */
+    public static void endTick(MinecraftClient client) {
+        holdUse = false;
+        if (!active || aimTarget == null) {
             return;
         }
-        releaseAll(client);
+        ClientPlayerEntity p = client.player;
+        if (p == null || !p.isAlive() || client.currentScreen != null) {
+            return;
+        }
+        aim(p, aimTarget, SkillProfile.of(BotScreen.skill()), aimNoisy);
+    }
+
+    private static void run(MinecraftClient client, ClientPlayerEntity p, AutopilotInput in) {
         if (eatCd > 0) eatCd--;
         if (placeCd > 0) placeCd--;
         if (++msgTimer % 40 == 0) {
@@ -101,7 +172,6 @@ public final class ClientAutopilot {
         }
 
         SkillProfile sk = SkillProfile.of(BotScreen.skill());
-        GameOptions o = client.options;
 
         if (--noiseTimer <= 0) {
             noiseTimer = sk.noiseInterval + RND.nextInt(3);
@@ -115,10 +185,15 @@ public final class ClientAutopilot {
 
         LivingEntity tgt = findTarget(client, p);
         if (tgt == null) {
+            eatTicks = 0;
             return;
         }
 
-        double hd = Math.hypot(tgt.getX() - p.getX(), tgt.getZ() - p.getZ());
+        double dx = tgt.getX() - p.getX();
+        double dz = tgt.getZ() - p.getZ();
+        double hd = Math.hypot(dx, dz);
+        double ux = hd > 1.0E-4 ? dx / hd : 0.0;
+        double uz = hd > 1.0E-4 ? dz / hd : 0.0;
         double dist = p.distanceTo(tgt);
         boolean ground = p.isOnGround();
 
@@ -126,16 +201,15 @@ public final class ClientAutopilot {
         int apple = hotbarSlot(p, Items.GOLDEN_APPLE, Items.ENCHANTED_GOLDEN_APPLE);
         if (eatTicks > 0) {
             eatTicks--;
-            aim(p, tgt, sk, true);
-            o.useKey.setPressed(true);
-            if (hd < 6.0) {
-                o.backKey.setPressed(true);
-            }
             if (!p.isUsingItem() && eatTicks < 28) {
                 eatTicks = 0;
                 eatCd = 160;
+            } else {
+                lookAt(tgt, true);
+                holdUse = true;
+                drive(in, p, ux, uz, hd < 6.0 ? -1.0 : 0.0, 0.0);
+                return;
             }
-            return;
         }
         if (apple >= 0 && eatCd <= 0 && p.getHealth() <= sk.gappleHp) {
             p.getInventory().selectedSlot = apple;
@@ -144,50 +218,52 @@ public final class ClientAutopilot {
         }
 
         // ---------- стройка ----------
-        if (build(client, p, tgt, hd, sk)) {
+        if (build(client, p, in, tgt, hd, sk)) {
             return;
         }
 
         // ---------- оружие ----------
         selectWeapon(p, p.fallDistance > 2.5f);
 
-        // ---------- прицел ----------
-        aim(p, tgt, sk, true);
+        // ---------- прицел (поворот выполняется в конце тика) ----------
+        lookAt(tgt, true);
 
         // ---------- движение ----------
-        if (hd > 3.0) {
-            o.forwardKey.setPressed(true);
-            if (sk.level >= 2 || hd > 5.0) {
-                o.sprintKey.setPressed(true);
-            }
-        } else if (hd < 1.4) {
-            o.backKey.setPressed(true);
-        }
-        if (hd < 6.0 && sk.strafe > 0.2) {
-            (strafeDir > 0 ? o.rightKey : o.leftKey).setPressed(true);
-        }
+        double approach = hd > 3.0 ? 1.0 : (hd < 1.4 ? -1.0 : 0.0);
+        double strafe = (hd < 6.0 && sk.strafe > 0.2) ? strafeDir : 0.0;
+        drive(in, p, ux, uz, approach, strafe);
+        wantSprint = approach > 0.0 && (sk.level >= 2 || hd > 5.0);
+
+        boolean jump = false;
         if (p.horizontalCollision && ground) {
-            o.jumpKey.setPressed(true);
+            jump = true;
+        }
+        if (p.isTouchingWater() || p.isInLava()) {
+            jump = true; // держимся на поверхности
         }
 
         // крит-прыжок: прыгаем рядом с целью, бьём на спуске
         boolean mace = p.getMainHandStack().isOf(Items.MACE);
         float cd = p.getAttackCooldownProgress(0.5f);
         if (wantCrit && !mace && ground && hd < 3.6 && cd > 0.55f) {
-            o.jumpKey.setPressed(true);
+            jump = true;
         }
         if (sk.level >= 5 && hd > 4.5 && ground && !wantCrit && RND.nextInt(12) == 0) {
-            o.jumpKey.setPressed(true);
+            jump = true;
         }
         boolean airborne = !ground;
         if (airborne && wantCrit) {
-            o.sprintKey.setPressed(false);
+            wantSprint = false;
         }
+        in.setJump(jump);
 
         // ---------- атака ----------
         boolean critWindow = !wantCrit || mace || (airborne && p.fallDistance > 0.0f);
-        boolean onCrosshair = client.targetedEntity == tgt;
-        if (onCrosshair && dist < 3.3 && cd >= nextReady && critWindow) {
+        boolean inReach = p.canSee(tgt) && lookingAt(p, tgt, REACH);
+        if (inReach && cd >= nextReady && critWindow) {
+            if (p.isUsingItem()) {
+                client.interactionManager.stopUsingItem(p); // опускаем щит перед ударом
+            }
             client.interactionManager.attackEntity(p, tgt);
             p.swingHand(Hand.MAIN_HAND);
             wantCrit = RND.nextDouble() < sk.critChance;
@@ -196,11 +272,36 @@ public final class ClientAutopilot {
 
         // ---------- щит ----------
         if (sk.level >= 3 && p.getOffHandStack().isOf(Items.SHIELD) && dist < 5.5 && cd < nextReady - 0.04f) {
-            o.useKey.setPressed(true);
+            holdUse = true;
         }
     }
 
     // =====================================================================
+
+    /**
+     * Ведёт игрока в мировых координатах относительно цели и переводит это в команды «вперёд/вбок»
+     * с учётом того, куда сейчас повёрнут игрок. Поэтому ходьба не зависит от камеры и прицельного шума.
+     *
+     * @param ux,uz    единичный вектор от игрока к цели (XZ)
+     * @param approach +1 — к цели, -1 — от цели, 0 — стоять на дистанции
+     * @param strafe   +1 / -1 — боком по кругу вокруг цели
+     */
+    private static void drive(AutopilotInput in, ClientPlayerEntity p, double ux, double uz, double approach, double strafe) {
+        double wx = ux * approach - uz * strafe;
+        double wz = uz * approach + ux * strafe;
+        double len = Math.hypot(wx, wz);
+        if (len > 1.0) {
+            wx /= len;
+            wz /= len;
+        }
+        double yaw = Math.toRadians(p.getYaw());
+        double sin = Math.sin(yaw);
+        double cos = Math.cos(yaw);
+        // вперёд по взгляду = (-sin, cos), влево = (cos, sin)
+        float forward = (float) (wz * cos - wx * sin);
+        float sideways = (float) (wz * sin + wx * cos);
+        in.setMove(forward, sideways);
+    }
 
     private static LivingEntity findTarget(MinecraftClient client, ClientPlayerEntity p) {
         List<LivingEntity> list = client.world.getEntitiesByClass(LivingEntity.class,
@@ -216,6 +317,20 @@ public final class ClientAutopilot {
             }
         }
         return best;
+    }
+
+    /** Попадёт ли удар: луч из глаз по текущему взгляду пересекает хитбокс цели. */
+    private static boolean lookingAt(ClientPlayerEntity p, LivingEntity t, double reach) {
+        Vec3d eye = p.getEyePos();
+        Vec3d end = eye.add(p.getRotationVec(1.0f).multiply(reach));
+        Box box = t.getBoundingBox().expand(t.getTargetingMargin());
+        return box.contains(eye) || box.raycast(eye, end).isPresent();
+    }
+
+    /** Запоминает, на кого навести камеру в конце тика. */
+    private static void lookAt(LivingEntity t, boolean noisy) {
+        aimTarget = t;
+        aimNoisy = noisy;
     }
 
     private static void aim(ClientPlayerEntity p, LivingEntity tgt, SkillProfile sk, boolean noisy) {
@@ -281,7 +396,8 @@ public final class ClientAutopilot {
 
     // ---------- стройка: мосты и столбы ----------
 
-    private static boolean build(MinecraftClient client, ClientPlayerEntity p, LivingEntity tgt, double hd, SkillProfile sk) {
+    private static boolean build(MinecraftClient client, ClientPlayerEntity p, AutopilotInput in,
+                                 LivingEntity tgt, double hd, SkillProfile sk) {
         if (sk.level < 3 || placeCd > 0) {
             return false;
         }
@@ -289,14 +405,13 @@ public final class ClientAutopilot {
         if (slot < 0) {
             return false;
         }
-        GameOptions o = client.options;
         double dy = tgt.getY() - p.getY();
 
         // столб вверх к более высокой цели
         if (dy >= 2.5 && hd < 6.0) {
-            aim(p, tgt, sk, false);
+            lookAt(tgt, false);
             if (p.isOnGround()) {
-                o.jumpKey.setPressed(true);
+                in.setJump(true);
                 return true;
             }
             if (p.getVelocity().y < 0.0) {
@@ -320,8 +435,8 @@ public final class ClientAutopilot {
                 Direction face = Direction.getFacing(dir.x, 0, dir.z);
                 if (!client.world.getBlockState(support).isReplaceable() && support.offset(face).equals(ahead)) {
                     p.getInventory().selectedSlot = slot;
-                    aim(p, tgt, sk, false);
-                    o.forwardKey.setPressed(true);
+                    lookAt(tgt, false);
+                    drive(in, p, dir.x, dir.z, 1.0, 0.0);
                     placeAgainst(client, p, support, face);
                     placeCd = 3;
                     return false;
