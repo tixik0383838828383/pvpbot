@@ -11,6 +11,9 @@
     "main": ["com.timur.pvpbot.PvpBotMod"],
     "client": ["com.timur.pvpbot.client.PvpBotClient"]
   },
+  "mixins": [
+    "pvpbot.mixins.json"
+  ],
   "depends": {
     "fabricloader": ">=0.16.0",
     "minecraft": "~1.21.1",

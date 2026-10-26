@@ -43,8 +43,10 @@ public class PvpBotClient implements ClientModInitializer {
                     }
                 }));
 
-        // автопилот должен выставить клавиши до того, как игрок их прочитает
+        // автопилот ведёт игрока через собственный ввод — выставляет команды до тика игрока
         ClientTickEvents.START_CLIENT_TICK.register(ClientAutopilot::tick);
+        // камера автопилота поворачивается в конце тика — так вид плавно интерполируется
+        ClientTickEvents.END_CLIENT_TICK.register(ClientAutopilot::endTick);
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (OPEN_KEY.wasPressed()) {
